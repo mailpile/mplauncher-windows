@@ -14,7 +14,11 @@ namespace Mailpile
         private MenuItem debugMenuItem;
         private NotifyIcon trayIcon;
         private Mailpile mailpile;
-        private Thread processWatcher;
+
+        private enum Status
+        {
+            OK = 200,
+        }
 
         public MailpileForm()
         {
@@ -25,6 +29,8 @@ namespace Mailpile
             this.InitTray();
             this.StartMailpile();
             this.StartProcessWatcherThread();
+
+            this.FormClosing += new FormClosingEventHandler(this.OnMailpileExit);
         }
 
         private void InitTray()
@@ -34,7 +40,7 @@ namespace Mailpile
 
             foreach(string key in keys)
             {
-                if(key.Equals("File") || key.Equals("Args") || key.Equals("REQ_Quit"))
+                if(key.Equals("File") || key.Equals("Args") || key.Equals("REQ_Quit") || key.Equals("Quit_wait"))
                 {
                     continue;
                 }
@@ -86,27 +92,84 @@ namespace Mailpile
             }
         }
 
-        private void StopMailpile()
+        private bool StopMailpile()
         {
             bool ok = true;
 
             if (!this.mailpile.HasExited)
             {
+                SplashForm.ShowSplashScreen();
                 string value = ConfigurationManager.AppSettings["REQ_Quit"];
+                HttpWebRequest request;
+                HttpWebResponse response;
 
                 if (!value.Equals(""))
                 {
                     try
                     {
-                        HttpWebRequest request = (HttpWebRequest)WebRequest.Create(value);
-                        ThreadPool.QueueUserWorkItem(o => { request.GetResponse(); });
+                        request = (HttpWebRequest)WebRequest.Create(value);
                     }
                     catch (Exception ex)
                     {
                         MessageBox.Show("Unable to stop Mailpile." + Environment.NewLine +
                                         "Exception: " + ex.Message, "Error",
                                         MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        request = null;
                         ok = false;
+                    }
+
+                    if(ok)
+                    {
+                        try
+                        {
+                            response = (HttpWebResponse)request.GetResponse();
+                        }
+                        catch (Exception ex)
+                        {
+                            ok = false;
+                            response = null;
+                        }
+                    }
+                    else
+                    {
+                        response = null;
+                    }
+
+                    if(!ok)
+                    {
+                        // no response from connection
+                        return true;
+                    }
+
+                    int statusCode = (int)response.StatusCode;
+
+                    if(statusCode == (int)Status.OK)
+                    {
+                        string wait_s = ConfigurationManager.AppSettings["Quit_wait"];
+                        int wait;
+
+                        try
+                        {
+                            wait = Convert.ToInt32(wait_s);
+                        }
+                        catch(Exception ex)
+                        {
+                            MessageBox.Show("Cannot convert \"Quit_wait\" to int32."  
+                                            + Environment.NewLine +
+                                            "Exception: " + ex.Message, "Error",
+                                             MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            wait = 0;
+                        }
+
+                        Thread.Sleep(wait);
+                        return true;
+                    }
+                    else
+                    {
+                        MessageBox.Show("Unable to stop mailpile, HTTP response: " + statusCode.ToString(),
+                                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        SplashForm.CloseSplashScreen();
+                        return false;
                     }
                 }
                 else
@@ -118,10 +181,7 @@ namespace Mailpile
                 }
             }
 
-            if (ok)
-            {
-                this.mailpile.Close();
-            }
+            return ok;
         }
 
         private void Notify(string info)
@@ -135,34 +195,18 @@ namespace Mailpile
 
         private void StartProcessWatcherThread()
         {
-            this.processWatcher = new Thread(new ThreadStart(this.WatchProcess));
+            Thread processWatcher = new Thread(new ThreadStart(this.WatchProcess));
+            processWatcher.IsBackground = true;
 
             try
             {
-                this.processWatcher.Start();
+                processWatcher.Start();
             }
             catch (Exception ex)
             {
                 MessageBox.Show("Unable to start ProcessWatcherThread." + Environment.NewLine +
                                 "Exception: " + ex.Message, "Error",
                                 MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private void StopProcessWatcherThread()
-        {
-            if (this.processWatcher != null)
-            {
-                try
-                {
-                    this.processWatcher.Abort();
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show("Unable to stop ProcessWatcherThread" + Environment.NewLine +
-                                     "Exception: " + ex.Message, "Error",
-                                     MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
             }
         }
 
@@ -228,9 +272,32 @@ namespace Mailpile
             if (MessageBox.Show("Are you sure you want to quit?", "Confirm quit", MessageBoxButtons.YesNo,
                 MessageBoxIcon.Question) == DialogResult.Yes)
             {
-                this.StopProcessWatcherThread();
-                this.StopMailpile();
-                Application.Exit();
+                bool quit = this.StopMailpile();
+                if (quit)
+                {
+                    this.mailpile.Close();
+                    Application.Exit();
+                }
+                SplashForm.CloseSplashScreen();
+            }
+        }
+
+        private void OnMailpileExit(object sender, FormClosingEventArgs e)
+        {
+            if (MessageBox.Show("Are you sure you want to quit?", "Confirm quit", MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question) == DialogResult.Yes)
+            {
+                bool quit = this.StopMailpile();
+                if (quit)
+                {
+                    this.mailpile.Close();
+                    Application.Exit();
+                }
+                SplashForm.CloseSplashScreen();
+            }
+            else
+            {
+                e.Cancel = true;
             }
         }
 
